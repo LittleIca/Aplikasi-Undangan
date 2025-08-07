@@ -1,0 +1,646 @@
+import { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, updateDoc, query } from 'firebase/firestore';
+import {
+  Clipboard,
+  Save,
+  Trash,
+  Edit2,
+  Copy,
+  Users,
+  Calendar,
+  Clock,
+  MapPin,
+  MessageCircle,
+  X,
+  Plus,
+  Link,
+  Signature,
+  Notebook,
+  CheckCircle,
+  Upload,
+  Download,
+  AlertTriangle
+} from 'lucide-react';
+
+// === Konfigurasi Firebase Anda ===
+// Konfigurasi ini sekarang terhubung ke proyek "surat-b2caa"
+const firebaseConfig = {
+  apiKey: "AIzaSyA_dK8niW70OypyAdWNJQzUB3kAm4tLYDw",
+  authDomain: "surat-b2caa.firebaseapp.com",
+  projectId: "surat-b2caa",
+  storageBucket: "surat-b2caa.firebasestorage.app",
+  messagingSenderId: "346909336642",
+  appId: "1:346909336642:web:6148cca658063dddc4f9db",
+  measurementId: "G-JJN7GLMWV0"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+// Menggunakan projectId sebagai appId, karena itu yang paling relevan
+const appId = firebaseConfig.projectId;
+
+// Fungsi utilitas untuk menyalin teks ke clipboard
+const copyToClipboard = (text) => {
+  const el = document.createElement('textarea');
+  el.value = text;
+  document.body.appendChild(el);
+  el.select();
+  document.execCommand('copy');
+  document.body.removeChild(el);
+};
+
+const App = () => {
+  const [userId, setUserId] = useState(null);
+  const [invitations, setInvitations] = useState([]);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [formData, setFormData] = useState({
+    recipientName: '',
+    eventName: '',
+    eventDate: '',
+    eventDay: '',
+    eventTime: '',
+    eventLocation: '',
+    mapsLink: '',
+    notes: '',
+    signature: ''
+  });
+  const [currentEditingId, setCurrentEditingId] = useState(null);
+  const [showModal, setShowModal] = useState(false);
+  const [modalText, setModalText] = useState('');
+  const [modalType, setModalType] = useState('success');
+  const [authError, setAuthError] = useState(null);
+  const fileInputRef = useRef(null);
+
+  // Path koleksi Firestore, sekarang menggunakan jalur PUBLIK agar data bisa dibaca oleh semua sesi
+  // Jalur ini harus persis sama dengan yang ada di aturan keamanan Firestore
+  const collectionPath = `/artifacts/${appId}/public/data/invitations`;
+
+  // Nama hari dalam bahasa Indonesia
+  const dayNames = ['Ahad', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+
+  // Memuat pustaka xlsx secara dinamis
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.async = true;
+    script.onload = () => {
+      console.log('XLSX library loaded successfully');
+    };
+    document.body.appendChild(script);
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, []);
+
+  // Menangani otentikasi Firebase saat aplikasi dimuat
+  useEffect(() => {
+    // Dengan konfigurasi hardcode, kita tidak memiliki token kustom
+    // sehingga kita langsung melakukan sign-in anonim.
+    signInAnonymously(auth)
+      .then((userCredential) => {
+        setUserId(userCredential.user.uid);
+        setIsAuthReady(true);
+      })
+      .catch((error) => {
+        console.error("Authentication failed:", error);
+        setAuthError('Gagal terhubung ke Firebase Authentication. Pastikan penyedia "Anonymous" sudah diaktifkan di Firebase Console Anda.');
+        setUserId(crypto.randomUUID());
+        setIsAuthReady(true);
+      });
+  }, []);
+
+  // Mendengarkan perubahan data di koleksi Firestore secara real-time
+  useEffect(() => {
+    if (!isAuthReady || authError) {
+      return;
+    }
+
+    const q = query(collection(db, collectionPath));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const savedInvitations = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setInvitations(savedInvitations);
+    }, (error) => {
+      console.error("Error fetching invitations:", error);
+      showMessage('Gagal memuat undangan. Periksa kembali aturan keamanan Firestore Anda.', 'error');
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, collectionPath, authError]);
+
+  // Menangani perubahan input formulir dan menghitung hari secara otomatis
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    let updatedFormData = { ...formData, [name]: value };
+
+    if (name === 'eventDate' && value) {
+      try {
+        const date = new Date(value);
+        const dayIndex = date.getDay();
+        const day = dayNames[dayIndex];
+        updatedFormData = { ...updatedFormData, eventDay: day };
+      } catch (error) {
+        console.error("Invalid date selected:", error);
+        updatedFormData = { ...updatedFormData, eventDay: '' };
+      }
+    }
+
+    setFormData(updatedFormData);
+  };
+
+  // Menghasilkan teks undangan lengkap dari objek data yang diberikan
+  const generateInvitationText = (data) => {
+    const { recipientName, eventName, eventDate, eventDay, eventTime, eventLocation, mapsLink, notes, signature } = data;
+    let text = `*📩Hal : UNDANGAN*\n\n`;
+    text += `*_Assalamu'alaikum Warahmatullahi Wabarakatuh_*\n\n`;
+
+    if (recipientName) {
+      text += `Dimohon kehadiran ${recipientName} pada :\n\n`;
+    } else {
+      text += `Dimohon kehadiran pada :\n\n`;
+    }
+
+    text += `📌 Hari        : ${eventDay}\n`;
+    const formattedDate = eventDate ? new Date(eventDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+    text += `📅 Tanggal : ${formattedDate}\n`;
+    text += `⏰ Waktu    : ${eventTime ? `${eventTime} WIB` : ''}\n`;
+    text += `📒 Acara     : ${eventName}\n`;
+    text += `🏡 Tempat  : ${eventLocation}\n`;
+    
+    if (mapsLink) {
+        text += `${mapsLink}\n\n`;
+    } else {
+        text += '\n';
+    }
+
+    text += `Demikian undangan ini kami sampaikan, atas perhatian dan kehadirannya kami ucapkan terimakasih.\n\n`;
+    text += `*_Wassalamu'alaikum Warahmatullahi Wabarakatuh_*\n\n`;
+    
+    if (notes) {
+      text += `NB: ${notes}\n\n`;
+    }
+    
+    text += `TTD\n`;
+    text += `_${signature}_`;
+
+    return text;
+  };
+
+  // Teks undangan untuk pratinjau langsung (menggunakan formData dari state)
+  const invitationText = generateInvitationText(formData);
+
+  // Menampilkan pesan modal
+  const showMessage = (text, type = 'success') => {
+    setModalText(text);
+    setModalType(type);
+    setShowModal(true);
+    setTimeout(() => {
+      setShowModal(false);
+    }, 3000);
+  };
+
+  // Menyimpan atau memperbarui undangan di Firestore
+  const handleSave = async () => {
+    if (!isAuthReady || !collectionPath) {
+      showMessage('Otentikasi belum siap. Silakan coba lagi.', 'error');
+      return;
+    }
+    
+    if (!formData.eventName || !formData.eventDate || !formData.eventTime || !formData.eventLocation || !formData.eventDay || !formData.signature) {
+      showMessage('Semua kolom acara dan tanda tangan harus diisi!', 'error');
+      return;
+    }
+    
+    if (authError) {
+      showMessage(authError, 'error');
+      return;
+    }
+
+    try {
+      if (currentEditingId) {
+        await updateDoc(doc(db, collectionPath, currentEditingId), {
+          ...formData,
+          createdAt: new Date().toISOString()
+        });
+        showMessage('Undangan berhasil diperbarui!', 'success');
+        setCurrentEditingId(null);
+      } else {
+        await addDoc(collection(db, collectionPath), {
+          ...formData,
+          createdAt: new Date().toISOString()
+        });
+        showMessage('Undangan berhasil disimpan!', 'success');
+      }
+      handleClearForm();
+    } catch (e) {
+      console.error("Error saving invitation:", e);
+      showMessage('Gagal menyimpan undangan. Silakan coba lagi. Pastikan aturan keamanan Firestore sudah benar.', 'error');
+    }
+  };
+
+  // Menghapus undangan dari Firestore
+  const handleDelete = async (id) => {
+    if (!isAuthReady || !collectionPath || authError) {
+      showMessage('Otentikasi belum siap. Silakan coba lagi.', 'error');
+      return;
+    }
+    try {
+      await deleteDoc(doc(db, collectionPath, id));
+      showMessage('Undangan berhasil dihapus!', 'success');
+    } catch (e) {
+      console.error("Error deleting invitation:", e);
+      showMessage('Gagal menghapus undangan. Silakan coba lagi. Pastikan aturan keamanan Firestore sudah benar.', 'error');
+    }
+  };
+
+  // Menduplikasi undangan ke Firestore
+  const handleDuplicate = async (invitation) => {
+    if (!isAuthReady || !collectionPath || authError) {
+      showMessage('Otentikasi belum siap. Silakan coba lagi.', 'error');
+      return;
+    }
+    try {
+      const { id, ...invitationToDuplicate } = invitation;
+      await addDoc(collection(db, collectionPath), {
+        ...invitationToDuplicate,
+        createdAt: new Date().toISOString()
+      });
+      showMessage('Undangan berhasil diduplikasi!', 'success');
+    } catch (e) {
+      console.error("Error duplicating invitation:", e);
+      showMessage('Gagal menduplikasi undangan. Silakan coba lagi. Pastikan aturan keamanan Firestore sudah benar.', 'error');
+    }
+  };
+
+  // Menyalin teks undangan spesifik dari rekap
+  const handleCopySpecificInvitation = (invitation) => {
+    const text = generateInvitationText(invitation);
+    copyToClipboard(text);
+    showMessage('Teks undangan berhasil disalin!', 'success');
+  };
+
+  // Memuat undangan ke dalam formulir untuk diedit
+  const handleEdit = (invitation) => {
+    setFormData({
+      recipientName: invitation.recipientName || '',
+      eventName: invitation.eventName || '',
+      eventDate: invitation.eventDate || '',
+      eventDay: invitation.eventDay || '',
+      eventTime: invitation.eventTime || '',
+      eventLocation: invitation.eventLocation || '',
+      mapsLink: invitation.mapsLink || '',
+      notes: invitation.notes || '',
+      signature: invitation.signature || ''
+    });
+    setCurrentEditingId(invitation.id);
+  };
+
+  // Membersihkan formulir
+  const handleClearForm = () => {
+    setFormData({
+      recipientName: '',
+      eventName: '',
+      eventDate: '',
+      eventDay: '',
+      eventTime: '',
+      eventLocation: '',
+      mapsLink: '',
+      notes: '',
+      signature: ''
+    });
+    setCurrentEditingId(null);
+  };
+
+  // Menyalin teks undangan ke clipboard (tombol utama di formulir)
+  const handleCopy = () => {
+    copyToClipboard(invitationText);
+    showMessage('Teks undangan berhasil disalin!', 'success');
+  };
+
+  // Mengekspor data ke XLSX
+  const handleExport = () => {
+    try {
+      if (typeof XLSX === 'undefined') {
+        showMessage('Pustaka XLSX belum dimuat. Silakan coba lagi.', 'error');
+        return;
+      }
+      const dataToExport = invitations.map(({ id, ...rest }) => rest);
+      const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Undangan");
+      const date = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(workbook, `Undangan_Tanggal_${date}.xlsx`);
+      showMessage('Data berhasil diekspor!', 'success');
+    } catch (e) {
+      console.error("Error exporting data:", e);
+      showMessage('Gagal mengekspor data. Silakan coba lagi.', 'error');
+    }
+  };
+
+  // Mengimpor data dari XLSX
+  const handleImport = (event) => {
+    try {
+      if (typeof XLSX === 'undefined') {
+        showMessage('Pustaka XLSX belum dimuat. Silakan coba lagi.', 'error');
+        return;
+      }
+      const file = event.target.files[0];
+      if (!file) {
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(worksheet);
+
+        // Menambahkan setiap undangan yang diimpor ke Firestore
+        for (const item of json) {
+          await addDoc(collection(db, collectionPath), {
+            ...item,
+            createdAt: new Date().toISOString()
+          });
+        }
+        showMessage('Data berhasil diimpor!', 'success');
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (e) {
+      console.error("Error importing data:", e);
+      showMessage('Gagal mengimpor data. Silakan coba lagi.', 'error');
+    }
+  };
+
+  // Komponen modal sederhana untuk pesan
+  const ModalMessage = ({ text, type }) => (
+    <div className={`fixed top-4 left-1/2 -translate-x-1/2 p-4 rounded-lg shadow-lg z-50 transition-all duration-300 ${showModal ? 'opacity-100 scale-100' : 'opacity-0 scale-90'} ${type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>
+      <div className="flex items-center gap-2">
+        {type === 'success' ? <CheckCircle size={20} /> : <X size={20} />}
+        <span>{text}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 md:p-8 font-sans antialiased text-gray-800">
+      <ModalMessage text={modalText} type={modalType} />
+      
+      <header className="max-w-7xl mx-auto mb-8 bg-white rounded-2xl shadow-lg p-4">
+        <h1 className="text-3xl font-extrabold text-center text-teal-600 mb-4">Aplikasi Pembuat Undangan</h1>
+        <p className="text-center text-sm text-gray-500">ID Pengguna (untuk debug): {userId}</p>
+      </header>
+      
+      <div className="max-w-4xl mx-auto space-y-8">
+        
+        {/* Formulir dan Pratinjau */}
+        <div className="bg-white rounded-2xl shadow-xl p-6 flex flex-col gap-6">
+          <h2 className="text-2xl font-bold text-center text-teal-600">Isi Detail Undangan</h2>
+          {authError && (
+              <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-lg flex items-center gap-3">
+                  <AlertTriangle size={24} className="flex-shrink-0" />
+                  <p className="text-sm font-medium">{authError}</p>
+              </div>
+          )}
+          <div className="flex flex-col gap-4">
+            <div className="space-y-4">
+              <div className="relative">
+                <input
+                  type="text"
+                  name="recipientName"
+                  placeholder="Nama Penerima (contoh: John Doe)"
+                  value={formData.recipientName}
+                  onChange={handleInputChange}
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                />
+                <Users className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  name="eventName"
+                  placeholder="Nama Acara (contoh: Rapat Bulanan PH)"
+                  value={formData.eventName}
+                  onChange={handleInputChange}
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                />
+                <Notebook className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+              </div>
+              <div className="flex flex-col md:flex-row gap-4">
+                <div className="relative w-full">
+                  <input
+                    type="text"
+                    name="eventDay"
+                    placeholder="Hari"
+                    value={formData.eventDay}
+                    readOnly
+                    className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 bg-gray-50 text-gray-500 cursor-not-allowed transition duration-300"
+                  />
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+                </div>
+                <div className="relative w-full">
+                  <input
+                    type="date"
+                    name="eventDate"
+                    value={formData.eventDate}
+                    onChange={handleInputChange}
+                    className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                  />
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+                </div>
+              </div>
+              <div className="flex flex-col md:flex-row gap-4">
+                <div className="relative w-full">
+                  <input
+                    type="text"
+                    name="eventTime"
+                    placeholder="Waktu (contoh: 18.15)"
+                    value={formData.eventTime}
+                    onChange={handleInputChange}
+                    className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                  />
+                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+                </div>
+                <div className="relative w-full">
+                  <input
+                    type="text"
+                    name="eventLocation"
+                    placeholder="Tempat Acara"
+                    value={formData.eventLocation}
+                    onChange={handleInputChange}
+                    className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                  />
+                  <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+                </div>
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  name="mapsLink"
+                  placeholder="Link Google Maps (opsional)"
+                  value={formData.mapsLink}
+                  onChange={handleInputChange}
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                />
+                <Link className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+              </div>
+              <div className="relative">
+                <textarea
+                  name="notes"
+                  placeholder="Catatan Tambahan (NB) (opsional)"
+                  value={formData.notes}
+                  onChange={handleInputChange}
+                  rows="3"
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                ></textarea>
+                <MessageCircle className="absolute left-3 top-4 text-gray-400" size={20} />
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  name="signature"
+                  placeholder="Tanda Tangan/Nama Pengirim"
+                  value={formData.signature}
+                  onChange={handleInputChange}
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:border-teal-400 transition duration-300"
+                />
+                <Signature className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+              </div>
+            </div>
+
+            {/* Tombol Aksi */}
+            <div className="flex gap-4">
+              <button
+                onClick={handleSave}
+                className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-lg text-white font-bold transition-transform transform hover:scale-105 duration-200 ${currentEditingId ? 'bg-indigo-500 hover:bg-indigo-600' : 'bg-teal-500 hover:bg-teal-600'}`}
+              >
+                {currentEditingId ? <Edit2 size={20} /> : <Save size={20} />}
+                {currentEditingId ? 'Perbarui Undangan' : 'Simpan Undangan'}
+              </button>
+              <button
+                onClick={handleCopy}
+                className="flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-lg bg-emerald-500 text-white font-bold transition-transform transform hover:scale-105 duration-200"
+              >
+                <Clipboard size={20} />
+                Salin Teks
+              </button>
+            </div>
+            {currentEditingId && (
+              <button
+                onClick={handleClearForm}
+                className="w-full flex items-center justify-center gap-2 py-3 px-6 rounded-lg bg-gray-200 text-gray-700 font-bold transition-colors duration-200 hover:bg-gray-300"
+              >
+                <Plus size={20} className="rotate-45"/>
+                Buat Undangan Baru
+              </button>
+            )}
+          </div>
+          
+          {/* Pratinjau Langsung */}
+          <div className="mt-6 border-t-2 border-gray-200 pt-6">
+            <h2 className="text-2xl font-bold text-teal-600 mb-4">Pratinjau Teks Undangan</h2>
+            <div className="bg-gray-50 p-4 rounded-lg whitespace-pre-wrap text-sm text-gray-700 font-mono shadow-inner border border-gray-200">
+              {invitationText}
+            </div>
+          </div>
+        </div>
+
+        {/* Rekap Undangan dengan Impor/Ekspor */}
+        <div className="bg-white rounded-2xl shadow-xl p-6 flex flex-col gap-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold text-center text-indigo-600">Rekap Undangan</h2>
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImport}
+                style={{ display: 'none' }}
+                accept=".xlsx"
+              />
+              <button
+                onClick={() => fileInputRef.current.click()}
+                className="p-2 rounded-full text-white bg-blue-500 hover:bg-blue-600 transition-colors duration-200"
+                title="Import Excel"
+              >
+                <Upload size={20} />
+              </button>
+              <button
+                onClick={handleExport}
+                className="p-2 rounded-full text-white bg-green-500 hover:bg-green-600 transition-colors duration-200"
+                title="Export Excel"
+              >
+                <Download size={20} />
+              </button>
+            </div>
+          </div>
+          <p className="text-center text-gray-500">
+            Daftar undangan yang telah Anda simpan. Klik tombol edit untuk mengisi ulang formulir.
+          </p>
+
+          {invitations.length === 0 ? (
+            <div className="text-center text-gray-400 py-12 border-2 border-dashed border-gray-200 rounded-lg">
+              <div className="flex items-center justify-center mb-4">
+                <Copy size={48} className="text-gray-300"/>
+              </div>
+              <p>Anda belum memiliki undangan yang tersimpan.</p>
+              <p>Mulai buat undangan pertama Anda!</p>
+            </div>
+          ) : (
+            <ul className="space-y-4">
+              {invitations.map((invitation) => (
+                <li
+                  key={invitation.id}
+                  className="bg-gray-50 p-4 rounded-lg flex flex-col md:flex-row items-start md:items-center justify-between border-2 border-gray-200 shadow-sm"
+                >
+                  <div className="flex-1 mb-2 md:mb-0">
+                    <h3 className="font-bold text-lg text-gray-700">{invitation.eventName}</h3>
+                    <p className="text-sm text-gray-500">{invitation.recipientName ? `Untuk: ${invitation.recipientName}` : 'Umum'}</p>
+                    <p className="text-xs text-gray-400 mt-1">Disimpan: {new Date(invitation.createdAt).toLocaleString('id-ID')}</p>
+                  </div>
+                  <div className="flex-shrink-0 flex items-center gap-2">
+                    <button
+                      onClick={() => handleCopySpecificInvitation(invitation)} // Tombol Salin Teks baru
+                      className="p-2 rounded-full text-white bg-blue-500 hover:bg-blue-600 transition-colors duration-200"
+                      title="Salin Teks"
+                    >
+                      <Clipboard size={18} />
+                    </button>
+                    <button
+                      onClick={() => handleDuplicate(invitation)}
+                      className="p-2 rounded-full text-white bg-green-500 hover:bg-green-600 transition-colors duration-200"
+                      title="Duplikat"
+                    >
+                      <Copy size={18} />
+                    </button>
+                    <button
+                      onClick={() => handleEdit(invitation)}
+                      className="p-2 rounded-full text-white bg-indigo-500 hover:bg-indigo-600 transition-colors duration-200"
+                      title="Edit"
+                    >
+                      <Edit2 size={18} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(invitation.id)}
+                      className="p-2 rounded-full text-white bg-red-500 hover:bg-red-600 transition-colors duration-200"
+                      title="Hapus"
+                    >
+                      <Trash size={18} />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
